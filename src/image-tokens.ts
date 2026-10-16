@@ -212,14 +212,57 @@ function urlOf(v: unknown): string | undefined {
 // recognizes — custom content parts ({type:"image",attachment:{…}} from hosts'
 // own attachment flows), unknown google parts, opaque responses items. Charged
 // at serialized-bytes/4 (the same chars/4 rule as inline base64) so every
-// forwarded byte is priced at least once; pixels mode falls back to the flat
-// unparsable-container cost (the safe direction — undercounting forwards
-// over-window payloads). Call ONLY for parts the wire codec actually carries
-// (each branch gates on its codec's preservation rule); parts the codec drops
-// must not be charged.
+// forwarded byte is priced at least once. pixels mode prices by what the part
+// actually carries: an embedded base64 image keeps the dimension-based cost
+// (or the flat unparsable-container fallback for long exotic blobs — the safe
+// direction), a remote ref keeps REMOTE_IMAGE_TOKENS, and a part with NO image
+// payload is structured text whose bytes/4 IS its token mass. (Review #3412:
+// the original blanket flat fallback billed a ~90-byte item — e.g. codex's own
+// compaction handoff {type:"compaction"} — at 16K tokens of phantom mass in
+// every meter on the default pixels/auto route, hard-blocking payloads that
+// fit.) Call ONLY for parts the wire codec actually carries (each branch gates
+// on its codec's preservation rule); parts the codec drops must not be charged.
+const OPAQUE_B64_PARSE_MIN = 32; // below this: ids/hashes/tokens, never a container header
+const OPAQUE_B64_FALLBACK_MIN = 4096; // ~3KiB decoded: smallest plausible exotic image
+const OPAQUE_B64_CHARSET = /^[A-Za-z0-9+/=_-]+$/;
+
+/** Shared by the cost and count walkers: the image-class price of the
+ *  heaviest image carrier inside an opaque part (embedded base64 → dims/tile
+ *  estimate or the flat fallback for long unparseable blobs; data:/http(s)
+ *  ref → REMOTE_IMAGE_TOKENS), or 0 when the part carries no image payload —
+ *  it is then priced at bytes/4 and counted as ZERO images, so the #1843
+ *  per-image multiplier and learned-cost EMA never see non-image mass. */
+function opaqueImageCarrierCost(part: Record<string, unknown>, configuredCap?: number): number {
+    let best = 0;
+    const visit = (v: unknown): void => {
+        if (typeof v === "string") {
+            if (/^https?:\/\//.test(v)) { best = Math.max(best, applyCap(REMOTE_IMAGE_TOKENS, configuredCap)); return; }
+            let s = v;
+            if (s.startsWith("data:")) {
+                const i = s.indexOf(";base64,");
+                if (i < 0) return;
+                s = s.slice(i + ";base64,".length);
+            }
+            if (s.length >= OPAQUE_B64_PARSE_MIN && OPAQUE_B64_CHARSET.test(s)) {
+                const dims = decodeImageDims(s);
+                const cost = dims ? pixelTileEstimate(dims.w, dims.h) : s.length >= OPAQUE_B64_FALLBACK_MIN ? PIXEL_IMAGE_FALLBACK_TOKENS : 0;
+                if (cost > 0) best = Math.max(best, applyCap(cost, configuredCap));
+            }
+            return;
+        }
+        if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+        if (isObj(v)) for (const x of Object.values(v)) visit(x);
+    };
+    visit(part);
+    return best;
+}
+
 function opaquePartCost(part: Record<string, unknown>, billing: ResolvedImageBilling, configuredCap?: number): number {
-    if (billing === "bytes") return applyCap(Math.ceil(JSON.stringify(part).length / 4), configuredCap);
-    return applyCap(PIXEL_IMAGE_FALLBACK_TOKENS, configuredCap);
+    if (billing === "pixels") {
+        const carrier = opaqueImageCarrierCost(part, configuredCap);
+        if (carrier > 0) return carrier;
+    }
+    return applyCap(Math.ceil(JSON.stringify(part).length / 4), configuredCap);
 }
 
 // #3398: responses item types whose payload rides the TEXT channel (kernel core
@@ -403,9 +446,10 @@ export function countImagesInParsedBody(protocol: "anthropic" | "openai" | "resp
                 if (isObj(inline) && typeof inline.data === "string") { n += 1; continue; }
                 const file = part.fileData;
                 if (isObj(file) && typeof file.fileUri === "string") { n += 1; continue; }
-                // #3398 lockstep: same opaque-part gate as the cost walker.
+                // #3398 lockstep: same opaque-part gate as the cost walker; carrier-gated so
+                // non-image mass never rides the per-image multiplier (#3412 review).
                 if (typeof part.text === "string" || isObj(part.functionCall) || isObj(part.functionResponse) || isObj(part.videoMetadata)) continue;
-                n += 1;
+                n += opaqueImageCarrierCost(part) > 0 ? 1 : 0;
             }
         }
         return n;
@@ -417,8 +461,9 @@ export function countImagesInParsedBody(protocol: "anthropic" | "openai" | "resp
             if (!isObj(item)) continue;
             const parts = Array.isArray(item.content) ? item.content : responsesToolImageParts(item);
             if (!parts) {
-                // #3398 lockstep: unknown item types ride the preamble verbatim.
-                if (typeof item.type === "string" && !RESPONSES_TEXT_CHANNEL_TYPES.has(item.type)) n += 1;
+                // #3398 lockstep: unknown item types ride the preamble verbatim;
+                // only image-carrying ones count as images (#3412 review).
+                if (typeof item.type === "string" && !RESPONSES_TEXT_CHANNEL_TYPES.has(item.type) && opaqueImageCarrierCost(item) > 0) n += 1;
                 continue;
             }
             for (const part of parts) {
@@ -427,8 +472,9 @@ export function countImagesInParsedBody(protocol: "anthropic" | "openai" | "resp
                     if (urlOf(part.image_url)) n += 1;
                     continue;
                 }
-                // #3398 lockstep: custom parts on USER items only (codec drops them elsewhere).
-                if (item.type === "message" && item.role === "user" && part.type !== "input_text" && part.type !== "output_text") n += 1;
+                // #3398 lockstep: custom parts on USER items only (codec drops them elsewhere);
+                // carrier-gated so non-image mass never rides the per-image multiplier (#3412 review).
+                if (item.type === "message" && item.role === "user" && part.type !== "input_text" && part.type !== "output_text" && opaqueImageCarrierCost(part) > 0) n += 1;
             }
         }
         return n;
@@ -446,8 +492,9 @@ export function countImagesInParsedBody(protocol: "anthropic" | "openai" | "resp
                 }
                 if (part.type === "file") { n += 1; continue; }
                 if (part.type === "text") continue;
-                // #3398 lockstep: user-role opaque parts only (codec drops them on other roles).
-                if (m.role === "user") n += 1;
+                // #3398 lockstep: user-role opaque parts only (codec drops them on other roles),
+                // carrier-gated so non-image mass never rides the per-image multiplier (#3412 review).
+                if (m.role === "user" && opaqueImageCarrierCost(part) > 0) n += 1;
                 continue;
             } else {
                 if (part.type === "image") {
@@ -461,7 +508,9 @@ export function countImagesInParsedBody(protocol: "anthropic" | "openai" | "resp
                 if (part.type === "tool_result" && Array.isArray(part.content)) {
                     for (const c of part.content) {
                         if (!isObj(c) || c.type === "text") continue;
-                        n += 1;
+                        const src = c.source;
+                        const knownMedia = (isObj(src) && src.type === "base64" && typeof src.data === "string") || (isObj(src) && src.type === "url" && typeof src.url === "string");
+                        if (knownMedia || opaqueImageCarrierCost(c) > 0) n += 1;
                     }
                     continue;
                 }

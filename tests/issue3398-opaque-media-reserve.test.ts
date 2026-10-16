@@ -16,6 +16,7 @@ import {
     countImagesInRawBody,
     imageTokensInParsedBody,
     imageTokensInRawBody,
+    pixelTileEstimate,
     PIXEL_IMAGE_FALLBACK_TOKENS,
     REMOTE_IMAGE_TOKENS,
 } from "../src/image-tokens.ts";
@@ -33,8 +34,11 @@ import { imagePlaceholders } from "../src/image-note.ts";
 // against the full window and never fired.
 //
 // Fix under test: unrecognized non-text parts that the codec carries verbatim
-// get the opaque charge (serialized-bytes/4 in bytes mode, the flat
-// unparsable-container cost in pixels mode), gated per wire on the codec's
+// get the opaque charge (serialized-bytes/4 in bytes mode; in pixels mode by
+// what they carry — embedded base64 images keep the dimension-based cost,
+// long unparseable blobs get the flat container fallback, and carrier-less
+// structured text stays at bytes/4 so a ~90-byte item like codex's compaction
+// handoff never bills 16K tokens, #3412 review), gated per wire on the codec's
 // actual preservation rule (e.g. openai charges user-role parts only — other
 // roles reduce to text-only in the codec). Unit tests pin every gate; the
 // integration test proves the end-to-end consequence: a payload whose mass is
@@ -117,7 +121,10 @@ test("#3398: google unknown-shape parts are priced; text/function carriers stay 
         imageTokensInParsedBody("google", body, "bytes"),
         Math.ceil(JSON.stringify(weird).length / 4) + Math.ceil(4096 / 4),
     );
-    assert.equal(countImagesInParsedBody("google", body), 2);
+    // #3412 review: only the inlineData part carries an image payload; the
+    // small unparseable blob is structured text — priced but not counted, so
+    // the #1843 per-image multiplier never sees it.
+    assert.equal(countImagesInParsedBody("google", body), 1);
 });
 
 test("#3398: responses user-item custom parts and unknown item types are priced; assistant items and text-channel types are not", () => {
@@ -136,13 +143,36 @@ test("#3398: responses user-item custom parts and unknown item types are priced;
         imageTokensInParsedBody("responses", body, "bytes"),
         Math.ceil(JSON.stringify(userMedia).length / 4) + Math.ceil(JSON.stringify(mystery).length / 4),
     );
-    assert.equal(countImagesInParsedBody("responses", body), 2);
+    // #3412 review: neither blob parses as an image nor reaches the exotic-blob
+    // floor — both are structured text, priced but counted as zero images.
+    assert.equal(countImagesInParsedBody("responses", body), 0);
 });
 
 test("#3398: the configured cap and pixels billing apply to opaque parts too", () => {
     const body = openaiBody("user", [CUSTOM_PART]);
     assert.equal(imageTokensInParsedBody("openai", body, "bytes", 500), 500);
     assert.equal(imageTokensInParsedBody("openai", body, "pixels"), PIXEL_IMAGE_FALLBACK_TOKENS);
+});
+
+test("#3412: pixels mode prices carrier-less opaque items at bytes/4 — codex compaction handoffs must not bill the flat fallback", () => {
+    // The exact item shapes codex echoes back on every post-compaction turn
+    // (tests/codex-compact-e2e.test.ts). Before this fix each billed
+    // PIXEL_IMAGE_FALLBACK_TOKENS in pixels mode (the default route) and the
+    // side-request guard hard-blocked payloads that fit (~32K phantom tokens).
+    const itemA = { type: "compaction", id: "fc_bili_local", encrypted_content: "summary retained" };
+    const itemB = { type: "compaction", id: "cmp_upstream", encrypted_content: "opaque-upstream-blob" };
+    const body = { input: [itemA, itemB, { type: "message", role: "user", content: "Create a title" }] };
+    const expected = Math.ceil(JSON.stringify(itemA).length / 4) + Math.ceil(JSON.stringify(itemB).length / 4);
+    assert.equal(imageTokensInParsedBody("responses", body, "pixels"), expected);
+    assert.ok(expected < PIXEL_IMAGE_FALLBACK_TOKENS, `expected ${expected} < flat fallback`);
+    assert.equal(countImagesInParsedBody("responses", body), 0);
+});
+
+test("#3412: pixels mode prices an embedded base64 image inside a custom part by its dimensions, not the flat fallback", () => {
+    const part = { type: "image", attachment: { id: "att_1", data: TINY_PNG_B64 } };
+    const body = openaiBody("user", [{ type: "text", text: "hi" }, part]);
+    assert.equal(imageTokensInParsedBody("openai", body, "pixels"), pixelTileEstimate(1, 1));
+    assert.equal(countImagesInParsedBody("openai", body), 1);
 });
 
 test("#3398: image-note renders distinct [media: …] placeholders for opaque payloads restorable only as a note", () => {
