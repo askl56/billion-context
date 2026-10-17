@@ -417,7 +417,7 @@ export async function prepareOpenai(
     // prompt_cache_key survives verbatim ONLY on relay destinations
     // ("client wins" there, the body-keyed relay family may be keyed by it)
     // and is stripped on all other egress.
-    if (shouldStampRelayAffinityPck(conversationHeaderSource(req.headers)?.name, parsed.prompt_cache_key, billingUpstream, upstreamOrigin)) {
+    if (shouldStampRelayAffinityPck(conversationHeaderSource(req.headers)?.name, parsed.prompt_cache_key, upstreamOrigin)) {
         rebuilt.prompt_cache_key = session.id;
     } else if (!relayAffinityDestined(upstreamOrigin)) {
         delete (rebuilt as Record<string, unknown>).prompt_cache_key;
