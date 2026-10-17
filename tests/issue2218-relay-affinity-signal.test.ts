@@ -103,8 +103,11 @@ function chatBody(extra: Record<string, unknown> = {}): Record<string, unknown> 
 test("#2218 unit: shouldStampRelayAffinityPck gate matrix", () => {
     const loop = "http://127.0.0.1:7864/v1";
     const remote = "https://relay.example.com/v1";
-    // plugin lane + no client pck + admin-rewritten route → stamp
-    assert.equal(shouldStampRelayAffinityPck("x-bili-plugin-conversation", undefined, loop, remote), true);
+    // #2649: plugin lane + no client pck + rewritten route to a REMOTE
+    // destination → NO stamp (a rewritten/embedded URL is not relay
+    // evidence — the /bili/ tunnel rewrites the user's own remote
+    // destination too; verbatim stamps 400'd strict upstreams, #2645)
+    assert.equal(shouldStampRelayAffinityPck("x-bili-plugin-conversation", undefined, loop, remote), false);
     // plugin lane + no client pck + loopback destination without a route → stamp
     assert.equal(shouldStampRelayAffinityPck("x-bili-plugin-conversation", undefined, undefined, loop), true);
     // plugin lane + no client pck + unrouted non-loopback (strict direct API risk, #1403) → no stamp
