@@ -1085,12 +1085,22 @@ function codexToml(): string {
     return homeFile(".codex/config.toml");
 }
 
+/** Persist the STABLE node path, not the version-specific Homebrew Cellar
+ *  path process.execPath resolves to — a brew upgrade deletes the old Cellar
+ *  dir and breaks every command we ever wrote into a host config. Plain kegs
+ *  link into <prefix>/bin; versioned node@X kegs link into <prefix>/opt/node@X/bin. */
+export function stableNodeCommand(execPath: string = process.execPath): string {
+    const m = /^(.*)\/Cellar\/(node[^/]*)\/[^/]+\/bin\/node(?:\.exe)?$/.exec(execPath);
+    if (m === null) return execPath;
+    return m[2] === "node" ? `${m[1]}/bin/node` : `${m[1]}/opt/${m[2]}/bin/node`;
+}
+
 function codexBlock(): string {
     // #1660: no baked origin — the MCP shell discovers the live proxy at
     // startup (env > live instance file > 8787 user-zone default), so the
     // block never goes stale when the proxy's port drifts or the machine
     // reboots. BILI_MCP_PROXY in the user's environment still wins.
-    return `\n[mcp_servers.bili]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(path.join(selfPackageRoot(), "dist", "mcp.js"))}]\n`;
+    return `\n[mcp_servers.bili]\ncommand = ${JSON.stringify(stableNodeCommand())}\nargs = [${JSON.stringify(path.join(selfPackageRoot(), "dist", "mcp.js"))}]\n`;
 }
 
 function malformedCodexArgs(block: string): boolean {
@@ -1458,7 +1468,7 @@ function opencodeInstall(withMcp = false): string {
                         notes.push("mcp.bili present");
                     }
                 } else {
-                    const entry: Record<string, unknown> = { type: "local", command: [process.execPath, mcpJs], enabled: true };
+                    const entry: Record<string, unknown> = { type: "local", command: [stableNodeCommand(), mcpJs], enabled: true };
                     if (explicit !== undefined) entry.environment = { BILI_MCP_PROXY: explicit };
                     mcp.bili = entry;
                     data.mcp = mcp;
