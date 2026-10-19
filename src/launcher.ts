@@ -58,7 +58,7 @@ import {
 } from "./instance.js";
 import { TWIN_ADOPT_EXIT_CODE } from "./listen-policy.js";
 import { tcpConnectable } from "./liveness.js";
-import { selfPackageRoot, isBiliPiEntry, ompPluginLoadedFrom, dshNativeInstalled, claudeNativeInstalled, piPackageStrings } from "./plugin-install.js";
+import { selfPackageRoot, isBiliPiEntry, ompPluginLoadedFrom, dshNativeInstalled, claudeNativeInstalled, piPackageStrings, stableNodeCommand } from "./plugin-install.js";
 import { applyOmpFirstEventTimeout, envMillis } from "./agent/native-bootstrap.js";
 import { logHostEvent } from "./agent/host-log.js";
 import { compactionDisablePatchRows } from "./agent/dsh-compaction-disable.js";
@@ -3022,7 +3022,7 @@ function mergeCodexBiliBlock(text: string, origin: string, conversationId: strin
     const script = selfDistFile("mcp.js");
     const block =
         "\n[mcp_servers.bili]\n" +
-        `command = ${JSON.stringify(process.execPath)}\n` +
+        `command = ${JSON.stringify(stableNodeCommand())}\n` +
         `args = [${JSON.stringify(script)}]\n` +
         `env = { BILI_MCP_PROXY = ${JSON.stringify(origin)}, BILI_CONVERSATION_ID = ${JSON.stringify(conversationId)} }\n`;
     const base = stripCodexBiliBlock(text);
