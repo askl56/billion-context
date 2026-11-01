@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import os from "node:os";
 import { once } from "node:events";
 import { startServer } from "../src/server.ts";
 import { defaultConfig } from "acp-kernel";
@@ -41,7 +42,7 @@ interface Harness {
     close(): Promise<void>;
 }
 
-async function startHarness(strictModels?: Set<string>): Promise<Harness> {
+async function startHarness(strictModels?: Set<string>, opts: { bindAddress?: string } = {}): Promise<Harness> {
     const captured: Captured[] = [];
     let strictness: Strictness = "lenient";
     const upstream = http.createServer((req, res) => {
@@ -65,7 +66,7 @@ async function startHarness(strictModels?: Set<string>): Promise<Harness> {
             res.end(chatSse());
         });
     });
-    upstream.listen(0, "127.0.0.1");
+    upstream.listen(0, opts.bindAddress ?? "127.0.0.1");
     await once(upstream, "listening");
     const upstreamPort = (upstream.address() as { port: number }).port;
 
@@ -276,6 +277,55 @@ test("#2645 probe: memory resets between processes (no persistence)", () => {
 // drives egress facts without limit — both growth axes (distinct pairs AND
 // per-pair session ids) are capped. These are pure unit tests (no server): the
 // caps live entirely in recordPckAblation's bookkeeping.
+/** A machine non-loopback IPv4 address stands in for a REMOTE upstream: the
+ *  socket still lands on this host, but bili resolves the destination as
+ *  remote — the shape the old static destination gate tried to police. */
+function nonLoopbackIPv4(): string | undefined {
+    for (const name of Object.keys(os.networkInterfaces())) {
+        for (const i of os.networkInterfaces()[name] ?? []) {
+            if (i.family === "IPv4" && !i.internal) return i.address;
+        }
+    }
+    return undefined;
+}
+
+// #2645 shape-independence: the probe-and-remember seam lives at the relay
+// egress, so it must work the same for a REMOTE destination as for loopback.
+// This is the regression that pins the removal of the old static
+// destination-shape gate (loopback-only stamping): under routing auto the key
+// IS stamped onto a remote origin, the strict upstream 400s, and the A/B
+// retry without the key is what recovers the turn — no destination heuristic
+// involved. Upstream's own probe tests only exercise loopback upstreams.
+test("#2645 probe: a strict REMOTE upstream self-heals through the same A/B probe", async (t) => {
+    const destIp = nonLoopbackIPv4();
+    if (!destIp) { t.skip("no non-loopback IPv4 interface available in this environment"); return; }
+    const h = await startHarness(undefined, { bindAddress: destIp });
+    try {
+        h.setStrictness("strict");
+        const base = `http://127.0.0.1:${h.proxyPort}/bili/http://${destIp}:${h.upstreamPort}/v1/chat/completions`;
+        // Turn 1: the stamp is attempted (no destination gate), the strict
+        // remote upstream 400s, the probe re-sends without the key and that is
+        // accepted — the client never sees the 400.
+        const r1 = await fetch(base, { method: "POST", headers: pluginHeaders("dsh-remote-1"), body: JSON.stringify(chatBody()) });
+        assert.equal(r1.status, 200);
+        await r1.text();
+        assert.equal(h.captured.length, 2);
+        assert.equal(h.captured[0].body.prompt_cache_key, "dsh-remote-1"); // stamped onto the remote origin
+        assert.equal(h.captured[1].body.prompt_cache_key, undefined);   // probe stripped it
+        // The remote origin+model pair is remembered, so turn 2 goes out key-less.
+        const abled = pckAblations();
+        assert.equal(abled.length, 1);
+        assert.equal(abled[0].origin, `http://${destIp}:${h.upstreamPort}`);
+        const r2 = await fetch(base, { method: "POST", headers: pluginHeaders("dsh-remote-1"), body: JSON.stringify(chatBody()) });
+        assert.equal(r2.status, 200);
+        await r2.text();
+        assert.equal(h.captured.length, 3);
+        assert.equal(h.captured[2].body.prompt_cache_key, undefined);
+    } finally {
+        await h.close();
+    }
+});
+
 test("#3813 bound: a flood of distinct (origin,model) pairs cannot grow the registry without limit", () => {
     _resetPckProbeForTest();
     const N = 200; // well past the pair-table ceiling
