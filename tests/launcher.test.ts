@@ -442,7 +442,7 @@ test("findFreePort: returns another port when preferred is occupied", async () =
     }
 });
 
-import { selfPackageRoot, ompPluginLoadedFrom } from "../src/plugin-install.js";
+import { selfPackageRoot, ompPluginLoadedFrom, stableNodeCommand } from "../src/plugin-install.js";
 import { piPluginInstalled } from "../src/launcher.ts";
 
 test("runLaunch pi: native -e plugin injected only when not installed", async () => {
@@ -4414,7 +4414,10 @@ test("prepareCodexHome: no real config → overlay holds only the bili MCP block
         assert.equal(overlay, `${dir}-bili`);
         const txt = fs.readFileSync(path.join(overlay, "config.toml"), "utf8");
         assert.equal((txt.match(/\[mcp_servers\.bili\]/g) ?? []).length, 1);
-        assert.ok(txt.includes(`command = ${JSON.stringify(process.execPath)}`));
+        // The written command is the STABLE node path (a brew Cellar path is
+        // rewritten to its prefix-stable link) — a brew upgrade deletes the
+        // Cellar dir, so persisting process.execPath would break the command.
+        assert.ok(txt.includes(`command = ${JSON.stringify(stableNodeCommand())}`));
         assert.match(txt, /args = \[.*mcp\.js.*\]/);
         assert.ok(txt.includes(`BILI_MCP_PROXY = ${JSON.stringify(origin)}`));
         assert.ok(txt.includes(`BILI_CONVERSATION_ID = ${JSON.stringify(cid)}`));
