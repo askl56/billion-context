@@ -1,0 +1,13 @@
+✖ #2443: a manifest-advertised conditional tool (acp_retrieve) is registered on first routed request
+✖ #3278: armNativePi(inline) freezes the pseudo-origin synchronously without spawning
+✖ #3304 no hook armed ⇒ fall-back is byte-identical to pre-fix (unswapped lanes unaffected)
+✖ #3304 routed give-up: makeTarget(routedTarget) fall-back is restored too
+✖ #3544 discovery bring-up rotates a strictly-older same-lane resident off our canonical port
+✖ module evaluation marks the process as a native opencode host
+✖ module evaluation marks the process as a native pi host
+✖ storage engine: full-mode restart is invisible on the chat wire (== legacy restart / committed goldens, modulo the #4316 one-time citation renumbering)
+✖ storage-render golden (chat): wire bodies + persisted state match committed snapshot
+✖ tests/opencode-native.test.ts
+✖ v2 setup: activates from /bili/ baseURL on round 1, stamps headers, forwards tools
+✖ v2 setup: env-based activation without /bili/ URL
+✖ writeDshClientShimFiles + dshPluginEntry: resolvable shim yields the bare entry, missing or broken shim falls back to the file URL (#1590)
