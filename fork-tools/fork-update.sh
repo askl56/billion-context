@@ -40,7 +40,12 @@ pkg_version() {
 # Failing test names from a `npm test` log, normalized (durations stripped)
 # so the set can be compared across runs.
 failing_tests() {
-  grep -E '^✖' "$1" 2>/dev/null | sed -E 's/ \([0-9.]+ms\)$//' | sort -u
+  # '✖ failing tests:' is node's summary HEADER, not a test name — it must
+  # never enter the set (it would read as a new failure on every run).
+  grep -E '^✖' "$1" 2>/dev/null \
+    | grep -vE '^✖ (failing tests:|passing tests:|tests? )' \
+    | sed -E 's/ \([0-9.]+ms\)$//' \
+    | sort -u
 }
 
 cmd_status() {
@@ -149,8 +154,11 @@ cmd_update() {
   fi
 
   local regress added fixed
-  regress="$(comm -23 <(echo "$now") <(echo "$base") | grep -v '^✖ failing tests:$' | grep -v '^✖ failing tests:' | sed '/^$/d')"
-  added="$(comm -23 <(echo "$now") <(echo "$base"))"
+  # `now` already excludes node's summary header, so the comm output needs
+  # no further filtering — filtering here instead would leave `added` (the
+  # set the verdict is based on) unfiltered.
+  regress="$(comm -23 <(echo "$now") <(echo "$base"))"
+  added="$regress"
   fixed="$(comm -13 <(echo "$now") <(echo "$base"))"
 
   say "Test result"
